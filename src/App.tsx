@@ -184,7 +184,7 @@ function translateTypesEs(types:string[]): string {
   return types.map(translateTypeEs).join('/')
 }
 
-type SectionKey = 'rankings' | 'mejorascaidas' | 'movimientos'
+type SectionKey = 'rankings' | 'mejorascaidas' | 'movimientos' | 'batalla'
 type MoveSortCol = 'name' | 'type' | 'energy' | 'power' | 'turns'
 type MoveSortDir = 'asc' | 'desc'
 type MoveSortState = { col: MoveSortCol, dir: MoveSortDir }
@@ -269,6 +269,270 @@ function TypeIconsRow({ types, size=20 }: { types:string[], size?:number }){
   return (
     <div style={{display:'flex', gap:4, flexShrink:0}}>
       {types.map((t,i)=> <TypeIcon key={i} type={t} size={size} />)}
+    </div>
+  )
+}
+
+type IV = { atk:number, def:number, hp:number }
+
+/** Busca el nivel más alto (1-51, pasos de 0.5) que no pasa el tope de CP, para
+ * un IV fijo elegido por el usuario (a diferencia de findBestIV, que busca el
+ * MEJOR IV; acá el IV ya lo eligió el usuario, solo hace falta el nivel). */
+function findLevelForCustomIV(baseAtk:number, baseDef:number, baseHp:number, atkIV:number, defIV:number, hpIV:number, cpCap:number|null): number {
+  if(cpCap===null) return 51
+  let lo=0, hi=Math.min(100, CPMS.length-1), bestIdx=0
+  while(lo<=hi){
+    const mid=(lo+hi)>>1
+    const cp = calcCP(baseAtk, baseDef, baseHp, atkIV, defIV, hpIV, CPMS[mid])
+    if(cp<=cpCap){ bestIdx=mid; lo=mid+1 } else { hi=mid-1 }
+  }
+  return 1 + bestIdx/2
+}
+
+/**
+ * Sección "Batalla": simulador 1vs1 usando el motor REAL de PvPoke (cargado
+ * como scripts clásicos en index.html: GameMaster.js, Pokemon.js, Battle.js,
+ * ActionLogic.js, DamageCalculator.js). No es una reimplementación: es su
+ * código fuente real corriendo en el navegador, con nuestros propios datos.
+ */
+function BatallaSection({ liga, universoBusqueda, movesEs }: { liga:LigaKey, universoBusqueda:Compared[], movesEs:Record<string,string> }){
+  const cpCap = CP_CAPS[liga]
+  const cpParaMotor = cpCap===null ? 10000 : cpCap // Master League: PvPoke usa 10000 como "sin tope"
+
+  const [gmEstado, setGmEstado] = useState<'cargando'|'listo'|'error'>('cargando')
+  const [gmErrorMsg, setGmErrorMsg] = useState('')
+
+  useEffect(()=>{
+    let cancelado = false
+    async function cargarMotor(){
+      try{
+        const w = window as any
+        if(!w.$){
+          w.$ = function(){ return { insertAfter(){}, attr(){ return null }, eq(){ return this }, first(){ return this }, each(){}, length:0 } }
+        }
+        const res = await fetch('/data/moves_actualizados.json')
+        if(!res.ok) throw new Error('No se pudo leer moves_actualizados.json')
+        const gamemasterJson = await res.json()
+        w.$.ajax = function(opts:any){
+          if(opts && typeof opts.success === 'function'){
+            setTimeout(()=> opts.success(gamemasterJson), 0)
+          }
+        }
+        const gm = w.GameMaster.getInstance()
+        await new Promise(r=> setTimeout(r, 60))
+        if(cancelado) return
+        if(gm?.data?.pokemon?.length){
+          setGmEstado('listo')
+        } else {
+          setGmEstado('error'); setGmErrorMsg('El motor cargó pero sin datos de Pokémon.')
+        }
+      }catch(e:any){
+        if(!cancelado){ setGmEstado('error'); setGmErrorMsg(e.message || 'Error desconocido') }
+      }
+    }
+    cargarMotor()
+    return ()=>{ cancelado = true }
+  },[])
+
+  const [searchA, setSearchA] = useState('')
+  const [searchB, setSearchB] = useState('')
+  const [idA, setIdA] = useState<string|null>(null)
+  const [idB, setIdB] = useState<string|null>(null)
+  const [ivA, setIvA] = useState<IV>({atk:15, def:15, hp:15})
+  const [ivB, setIvB] = useState<IV>({atk:15, def:15, hp:15})
+  const [shieldsA, setShieldsA] = useState(1)
+  const [shieldsB, setShieldsB] = useState(1)
+  const [poolA, setPoolA] = useState<{fast:any[], charged:any[]}>({fast:[], charged:[]})
+  const [poolB, setPoolB] = useState<{fast:any[], charged:any[]}>({fast:[], charged:[]})
+  const [fastA, setFastA] = useState(''); const [chA1, setChA1] = useState(''); const [chA2, setChA2] = useState('')
+  const [fastB, setFastB] = useState(''); const [chB1, setChB1] = useState(''); const [chB2, setChB2] = useState('')
+  const [timeline, setTimeline] = useState<any[]|null>(null)
+  const [resultado, setResultado] = useState<{ratingA:number, ratingB:number}|null>(null)
+  const [simulando, setSimulando] = useState(false)
+  const [errorSim, setErrorSim] = useState('')
+
+  const traducirMove = (moveId:string) => movesEs[moveId] || moveId.replace(/_/g,' ')
+
+  function cargarPokemon(speciesId:string, esA:boolean){
+    const w = window as any
+    const battleTmp = new w.Battle()
+    battleTmp.setCP(cpParaMotor)
+    const poke = new w.Pokemon(speciesId, 0, battleTmp)
+    poke.initialize(cpParaMotor)
+    const pool = { fast: poke.fastMovePool||[], charged: [...(poke.chargedMovePool||[]), ...(poke.extraChargedMovePool||[])] }
+    if(esA){
+      setIdA(speciesId); setSearchA(''); setPoolA(pool)
+      setFastA(poke.fastMove?.moveId||''); setChA1(poke.chargedMoves?.[0]?.moveId||''); setChA2(poke.chargedMoves?.[1]?.moveId||'')
+      setIvA({atk:15, def:15, hp:15})
+    } else {
+      setIdB(speciesId); setSearchB(''); setPoolB(pool)
+      setFastB(poke.fastMove?.moveId||''); setChB1(poke.chargedMoves?.[0]?.moveId||''); setChB2(poke.chargedMoves?.[1]?.moveId||'')
+      setIvB({atk:15, def:15, hp:15})
+    }
+    setTimeline(null); setResultado(null)
+  }
+
+  function simular(){
+    if(!idA || !idB) return
+    setSimulando(true); setErrorSim('')
+    setTimeout(()=>{
+      try{
+        const w = window as any
+        const battle = new w.Battle()
+        battle.setCP(cpParaMotor)
+
+        function armar(speciesId:string, iv:IV, fast:string, ch1:string, ch2:string, index:number){
+          const p = new w.Pokemon(speciesId, index, battle)
+          p.ivs = { atk: iv.atk, def: iv.def, hp: iv.hp }
+          p.isCustom = true
+          const nivel = findLevelForCustomIV(p.baseStats.atk, p.baseStats.def, p.baseStats.hp, iv.atk, iv.def, iv.hp, cpCap)
+          p.setLevel(nivel, false)
+          p.initialize(false)
+          p.selectMove('fast', fast)
+          p.selectMove('charged', ch1, 0)
+          if(ch2 && ch2!=='none') p.selectMove('charged', ch2, 1)
+          return p
+        }
+
+        const pA = armar(idA, ivA, fastA, chA1, chA2, 0)
+        const pB = armar(idB, ivB, fastB, chB1, chB2, 1)
+
+        battle.setNewPokemon(pA, 0, false)
+        battle.setNewPokemon(pB, 1, false)
+        pA.shields = shieldsA; pA.startingShields = shieldsA
+        pB.shields = shieldsB; pB.startingShields = shieldsB
+
+        battle.simulate()
+
+        const tl = battle.getTimeline().filter((ev:any)=> ev.type && (ev.type.indexOf('fast')===0 || ev.type.indexOf('charged')===0))
+        setTimeline(tl)
+        setResultado({ ratingA: pA.getBattleRating(), ratingB: pB.getBattleRating() })
+      }catch(e:any){
+        setErrorSim('Error al simular: '+(e.message||e))
+      }
+      setSimulando(false)
+    }, 30)
+  }
+
+  function SelectorPokemon({ label, search, setSearch, id, iv, setIv, pool, fast, setFast, ch1, setCh1, ch2, setCh2, shields, setShields, onElegir }: any){
+    const resultados = search.trim() ? universoBusqueda.filter(c=> c.name.toLowerCase().includes(search.toLowerCase())).slice(0,8) : []
+    return (
+      <div style={{flex:1, minWidth:260, background:'var(--card2)', border:'1px solid var(--border)', borderRadius:12, padding:14}}>
+        <b>{label}</b>
+        {!id ? (
+          <div style={{marginTop:8, position:'relative'}}>
+            <input className="search" placeholder="Buscar Pokémon..." value={search} onChange={e=> setSearch(e.target.value)} />
+            {resultados.length>0 && (
+              <div style={{position:'absolute', zIndex:10, background:'var(--card)', border:'1px solid var(--border)', borderRadius:8, width:'100%', marginTop:4}}>
+                {resultados.map(c=>(
+                  <div key={c.id} style={{padding:8, cursor:'pointer'}} onClick={()=> onElegir(c.id)}>
+                    {formatName(c.name)} <span className="small">#{c.newRank}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div style={{marginTop:8, display:'flex', flexDirection:'column', gap:10}}>
+            <div style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}>
+              <span style={{fontWeight:700}}>{formatName(universoBusqueda.find(c=>c.id===id)?.name || id)}</span>
+              <button className="btn" onClick={()=> onElegir(null)}>Cambiar</button>
+            </div>
+
+            <div style={{display:'flex', gap:8}}>
+              {(['atk','def','hp'] as const).map(k=>(
+                <div key={k} style={{flex:1}}>
+                  <label className="small" style={{display:'block'}}>{k==='atk'?'Atq IV':k==='def'?'Def IV':'HP IV'}</label>
+                  <input type="number" min={0} max={15} className="search" value={iv[k]}
+                    onChange={e=> setIv({...iv, [k]: Math.max(0, Math.min(15, parseInt(e.target.value)||0))})} />
+                </div>
+              ))}
+            </div>
+
+            <div>
+              <label className="small" style={{display:'block'}}>Rápido</label>
+              <select className="search" value={fast} onChange={e=> setFast(e.target.value)}>
+                {pool.fast.map((m:any)=> <option key={m.moveId} value={m.moveId}>{traducirMove(m.moveId)}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="small" style={{display:'block'}}>Cargado 1</label>
+              <select className="search" value={ch1} onChange={e=> setCh1(e.target.value)}>
+                {pool.charged.map((m:any)=> <option key={m.moveId} value={m.moveId}>{traducirMove(m.moveId)}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="small" style={{display:'block'}}>Cargado 2</label>
+              <select className="search" value={ch2} onChange={e=> setCh2(e.target.value)}>
+                <option value="none">(ninguno)</option>
+                {pool.charged.filter((m:any)=> m.moveId!==ch1).map((m:any)=> <option key={m.moveId} value={m.moveId}>{traducirMove(m.moveId)}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="small" style={{display:'block'}}>Escudos</label>
+              <select className="search" value={shields} onChange={e=> setShields(parseInt(e.target.value))}>
+                <option value={0}>0 escudos</option>
+                <option value={1}>1 escudo</option>
+                <option value={2}>2 escudos</option>
+              </select>
+            </div>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  if(gmEstado==='cargando') return <div className="small">Cargando motor de batalla...</div>
+  if(gmEstado==='error') return <div className="notice">No se pudo cargar el motor de batalla: {gmErrorMsg}</div>
+
+  return (
+    <div style={{display:'flex', flexDirection:'column', gap:16}}>
+      <div className="small" style={{color:'var(--muted)'}}>
+        Simulador 1 vs 1 con el motor real de PvPoke. Elige los 2 Pokémon, sus IV, sus movimientos y escudos, y mira el combate turno a turno.
+      </div>
+
+      <div style={{display:'flex', gap:16, flexWrap:'wrap'}}>
+        <SelectorPokemon label="Pokémon A" search={searchA} setSearch={setSearchA} id={idA} iv={ivA} setIv={setIvA}
+          pool={poolA} fast={fastA} setFast={setFastA} ch1={chA1} setCh1={setChA1} ch2={chA2} setCh2={setChA2}
+          shields={shieldsA} setShields={setShieldsA}
+          onElegir={(id:string|null)=> id ? cargarPokemon(id, true) : setIdA(null)} />
+        <SelectorPokemon label="Pokémon B" search={searchB} setSearch={setSearchB} id={idB} iv={ivB} setIv={setIvB}
+          pool={poolB} fast={fastB} setFast={setFastB} ch1={chB1} setCh1={setChB1} ch2={chB2} setCh2={setChB2}
+          shields={shieldsB} setShields={setShieldsB}
+          onElegir={(id:string|null)=> id ? cargarPokemon(id, false) : setIdB(null)} />
+      </div>
+
+      <button className="btn btn-primary" disabled={!idA || !idB || simulando} onClick={simular} style={{alignSelf:'center', padding:'12px 32px', fontSize:16}}>
+        {simulando ? 'Simulando...' : '🥊 Simular Batalla'}
+      </button>
+
+      {errorSim && <div className="notice">{errorSim}</div>}
+
+      {resultado && (
+        <div style={{textAlign:'center'}}>
+          <b style={{fontSize:18}}>
+            Ganador: {resultado.ratingA>resultado.ratingB ? formatName(universoBusqueda.find(c=>c.id===idA)?.name||idA!) : formatName(universoBusqueda.find(c=>c.id===idB)?.name||idB!)}
+          </b>
+          <div className="small">Rating: {formatName(universoBusqueda.find(c=>c.id===idA)?.name||idA!)} {resultado.ratingA.toFixed(0)} — {resultado.ratingB.toFixed(0)} {formatName(universoBusqueda.find(c=>c.id===idB)?.name||idB!)}</div>
+        </div>
+      )}
+
+      {timeline && (
+        <div className="moves-table-wrap">
+          <table className="moves-table">
+            <thead><tr><th>Turno</th><th>Pokémon</th><th>Movimiento</th></tr></thead>
+            <tbody>
+              {timeline.map((ev:any, i:number)=>(
+                <tr key={i}>
+                  <td>{ev.turn}</td>
+                  <td>{ev.actor===0 ? formatName(universoBusqueda.find(c=>c.id===idA)?.name||idA!) : formatName(universoBusqueda.find(c=>c.id===idB)?.name||idB!)}</td>
+                  <td>{traducirMove(ev.name)} {ev.type.indexOf('charged')===0 ? '(cargado)' : '(rápido)'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   )
 }
@@ -861,6 +1125,7 @@ export default function App(){
             <button className={`section-btn ${section==='rankings' ? 'active' : ''}`} onClick={()=> setSection('rankings')}>📊 Rankings</button>
             <button className={`section-btn ${section==='mejorascaidas' ? 'active' : ''}`} onClick={()=> setSection('mejorascaidas')}>🔀 Mejoras / Caídas</button>
             <button className={`section-btn ${section==='movimientos' ? 'active' : ''}`} onClick={()=> setSection('movimientos')}>⚔️ Movimientos</button>
+            <button className={`section-btn ${section==='batalla' ? 'active' : ''}`} onClick={()=> setSection('batalla')}>🥊 Batalla</button>
           </div>
         </div>
       </div>
@@ -1167,6 +1432,10 @@ export default function App(){
               </div>
             )}
           </div>
+        )}
+
+        {section==='batalla' && (
+          <BatallaSection liga={liga} universoBusqueda={universoBusqueda} movesEs={movesEs} />
         )}
       </div>
 

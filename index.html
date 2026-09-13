@@ -21,6 +21,23 @@
       *{box-sizing:border-box;margin:0;padding:0}
       body{font-family: Inter, system-ui, sans-serif; background:#0f1115; color:#e5e7eb}
     </style>
+
+    <!-- Motor real de PvPoke (código fuente original, sin modificar la lógica) para
+         la sección "Batalla". Variables globales mínimas que su código espera. -->
+    <script>
+      var host = '';
+      var webRoot = '';
+      var siteVersion = '1';
+      var settings = { gamemaster: 'gamemaster' };
+    </script>
+    <script src="/pvpoke-engine/DamageCalculator.js"></script>
+    <script src="/pvpoke-engine/TimelineEvent.js"></script>
+    <script src="/pvpoke-engine/TimelineAction.js"></script>
+    <script src="/pvpoke-engine/DecisionOption.js"></script>
+    <script src="/pvpoke-engine/ActionLogic.js"></script>
+    <script src="/pvpoke-engine/Pokemon.js"></script>
+    <script src="/pvpoke-engine/GameMaster.js"></script>
+    <script src="/pvpoke-engine/Battle.js"></script>
   </head>
   <body>
     <div id="root"></div>
